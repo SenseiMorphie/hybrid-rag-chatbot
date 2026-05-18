@@ -1,0 +1,14 @@
+streamlit
+langchain
+langchain-openai
+langchain-community
+langchain-experimental
+langchain-text-splitters
+faiss-cpu
+rank-bm25
+pypdf
+tiktoken
+openai
+beautifulsoup4
+lxml
+python-dotenv
