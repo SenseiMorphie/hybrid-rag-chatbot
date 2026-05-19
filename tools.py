@@ -8,7 +8,7 @@ from config import WEATHER_API_KEY
 
 
 
-
+# this is a work in progress and will be expanded with more tools and better formatting, but the idea is:
 @tool
 def get_weather(location: str) -> str:
     """
