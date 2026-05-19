@@ -1,76 +1,106 @@
-
+# chain.py
+# Builds an OpenAI Tools Agent with three capabilities:
+#   • search_documents  — RAG over uploaded files (optional)
+#   • get_weather       — real-time weather via WeatherAPI
+#   • web_search        — real-time web search via DuckDuckGo
+#
+# Two entry points:
+#   build_agent_only()  — weather + web search only (no docs loaded yet)
+#   build_chain()       — full pipeline: RAG retriever + all tools
 
 from typing import List, Tuple
 
 from langchain_classic.schema import Document
-from langchain_classic.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnableLambda, RunnablePassthrough
+from langchain_classic.agents import create_openai_tools_agent, AgentExecutor
+from langchain_classic.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 from retriever import build_retriever
+from tools import get_base_tools, get_all_tools
 
 
+# ── System prompt ─────────────────────────────────────────────
+SYSTEM_PROMPT = """You are a helpful AI assistant with access to the following tools:
 
-PROMPT_TEMPLATE = """You are a helpful AI assistant with access to \
-document context and conversation history.
+1. search_documents — searches documents, PDFs, and files the user has uploaded (only available when documents are loaded)
+2. get_weather      — fetches real-time weather and 3-day forecasts for any location
+3. web_search       — searches the web for current news and real-time information
 
-Conversation so far:
-{chat_history}
+Tool selection rules:
+- Questions about uploaded files or documents           → use search_documents
+- Weather, temperature, forecast, climate questions     → use get_weather
+- Current events, news, live data, general web queries  → use web_search
+- If no documents are loaded, answer from your own knowledge or use web_search
+- Combine multiple tools when a question needs both document context and live data
+- Always use conversation history to understand follow-up questions
 
-Relevant document context:
-{context}
-
-Rules:
-1. If the answer is in the document context, use it to answer.
-2. If the question is about the conversation itself \
-   (e.g. "what did I just ask?", "what did you say earlier?", \
-   "summarise our chat"), answer using the conversation history above.
-3. Only say you don't know if the answer is genuinely in neither source.
-
-Question: {question}
-Answer:"""
-
-QA_PROMPT = ChatPromptTemplate.from_template(PROMPT_TEMPLATE)
+Always give a clear, well-structured answer after using the tools.
+Cite which source (document name or URL) your information came from when relevant.
+If you cannot find the answer using tools, say so honestly."""
 
 
-def _format_docs(docs: List[Document]) -> str:
-    """Join retrieved chunks into a single context string."""
-    if not docs:
-        return "No relevant documents found."
-    return "\n\n---\n\n".join(doc.page_content for doc in docs)
+# ── Agent prompt template ─────────────────────────────────────
+AGENT_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", SYSTEM_PROMPT),
+    MessagesPlaceholder(variable_name="chat_history"),
+    ("human", "{input}"),
+    MessagesPlaceholder(variable_name="agent_scratchpad"),
+])
+
+
+# ══════════════════════════════════════════════════════════════
+#  INTERNAL BUILDER
+# ══════════════════════════════════════════════════════════════
+
+def _make_executor(llm, tools: list) -> AgentExecutor:
+    """Wires tools + prompt into an AgentExecutor."""
+    agent = create_openai_tools_agent(llm, tools, AGENT_PROMPT)
+    return AgentExecutor(
+        agent=agent,
+        tools=tools,
+        verbose=False,
+        return_intermediate_steps=True,
+        handle_parsing_errors=True,
+        max_iterations=6,
+    )
+
+
+# ══════════════════════════════════════════════════════════════
+#  PUBLIC ENTRY POINTS
+# ══════════════════════════════════════════════════════════════
+
+def build_agent_only(llm) -> AgentExecutor:
+    """
+    Creates an agent with weather + web search only.
+    Called on app startup before any documents are loaded so the
+    user can chat, ask weather questions, and search immediately.
+
+    Args:
+        llm: ChatOpenAI instance
+
+    Returns:
+        AgentExecutor (no KB tool)
+    """
+    return _make_executor(llm, get_base_tools())
 
 
 def build_chain(
     chunks: List[Document],
     embeddings,
     llm,
-    **kwargs,         
-) -> Tuple[object, object, object]:
+    **kwargs,
+) -> Tuple[AgentExecutor, object, object]:
     """
-    Builds a simple LCEL RAG chain.
+    Builds the full agent after documents are loaded.
+    Adds search_documents on top of weather + web search.
 
-    Input expected by chain.invoke():
-        {
-            "question":     str   — the user's question,
-            "chat_history": str   — formatted conversation so far
-        }
+    Args:
+        chunks:     All Document chunks in the session knowledge base.
+        embeddings: OpenAIEmbeddings instance.
+        llm:        ChatOpenAI instance.
 
     Returns:
-        (chain, retriever, vectorstore)
-        retriever is returned separately so app.py can fetch source docs.
+        (agent_executor, retriever, vectorstore)
     """
     retriever, vectorstore = build_retriever(chunks, embeddings, llm)
-
-    chain = (
-        {
-            
-            "context":      lambda x: _format_docs(retriever.invoke(x["question"])),
-            "question":     lambda x: x["question"],
-            "chat_history": lambda x: x.get("chat_history", "No previous conversation."),
-        }
-        | QA_PROMPT
-        | llm
-        | StrOutputParser()
-    )
-
-    return chain, retriever, vectorstore
+    agent = _make_executor(llm, get_all_tools(retriever))
+    return agent, retriever, vectorstore
