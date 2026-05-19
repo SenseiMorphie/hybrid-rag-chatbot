@@ -1,5 +1,4 @@
-# app.py
-# Run with:  streamlit run app.py
+
 
 import os
 import sys
@@ -26,17 +25,15 @@ from chains import build_chain, build_agent_only
 logging.getLogger("langchain").setLevel(logging.ERROR)
 
 
-# ══════════════════════════════════════════════════════════════
-#  SESSION HELPERS
-# ══════════════════════════════════════════════════════════════
+
 
 def empty_session() -> dict:
     return dict(
-        messages=[],        # [{role, content, tools_used?, sources?}]
-        chunks=[],          # all Document chunks
-        sources=[],         # human-readable source labels
-        agent=None,         # AgentExecutor
-        retriever=None,     # stored separately to fetch source docs
+        messages=[],        
+        chunks=[],          
+        sources=[],         
+        agent=None,        
+        retriever=None,     
         vectorstore=None,
     )
 
@@ -124,9 +121,7 @@ def process_and_add(docs, label: str):
             st.error(f"❌ Error: {e}")
 
 
-# ══════════════════════════════════════════════════════════════
-#  PAGE CONFIG + CSS
-# ══════════════════════════════════════════════════════════════
+
 
 st.set_page_config(page_title="Multi-Source RAG", page_icon="🧠", layout="wide")
 
@@ -139,9 +134,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# ══════════════════════════════════════════════════════════════
-#  GLOBAL STATE INIT
-# ══════════════════════════════════════════════════════════════
+
 
 if "sessions" not in st.session_state:
     st.session_state.sessions = {"Session 1": empty_session()}
@@ -153,9 +146,6 @@ if "embeddings" not in st.session_state:
     st.session_state.embeddings = None
 
 
-# ══════════════════════════════════════════════════════════════
-#  SIDEBAR
-# ══════════════════════════════════════════════════════════════
 
 with st.sidebar:
 
@@ -187,7 +177,7 @@ with st.sidebar:
 
     st.divider()
 
-    # ── Session manager ──────────────────────────────────────
+    
     st.markdown("## 💬 Chat Sessions")
 
     col_name, col_btn = st.columns([3, 1])
@@ -228,7 +218,7 @@ with st.sidebar:
 
     st.divider()
 
-    # ── Document input (optional) ────────────────────────────
+   
     st.markdown("## 📁 Add Documents *(optional)*")
     st.caption("Upload files to enable document Q&A alongside weather and web search.")
 
@@ -272,7 +262,7 @@ with st.sidebar:
             if f:   process_and_add(load_json_file(f), f.name)
             else:   st.warning("Upload a JSON file first.")
 
-    # ── Knowledge base summary ───────────────────────────────
+    
     sess = get_session()
     if sess["sources"]:
         st.divider()
@@ -286,11 +276,7 @@ with st.sidebar:
             st.rerun()
 
 
-# ══════════════════════════════════════════════════════════════
-#  MAIN — CHAT UI
-# ══════════════════════════════════════════════════════════════
 
-# Always initialise base agent so chat works without docs
 init_base_agent()
 
 sess  = get_session()
@@ -311,7 +297,7 @@ c3.metric("Sources", len(sess["sources"]))
 
 st.divider()
 
-# ── Empty state ──────────────────────────────────────────────
+
 if not sess["messages"]:
     st.markdown(
         "<div style='text-align:center; padding:50px 20px; color:#9ca3af;'>"
@@ -325,7 +311,7 @@ if not sess["messages"]:
         unsafe_allow_html=True,
     )
 
-# ── Chat history ─────────────────────────────────────────────
+
 for msg in sess["messages"]:
     with st.chat_message(msg["role"]):
         st.write(msg["content"])
@@ -346,7 +332,7 @@ for msg in sess["messages"]:
                     st.markdown(f"> {src['content'][:350]}…")
                     st.divider()
 
-# ── Chat input — always enabled ──────────────────────────────
+
 prompt = st.chat_input("Ask anything — weather, news, or questions about your documents…")
 
 if prompt:

@@ -1,11 +1,4 @@
-# tools.py
-# Defines all LangChain tools available to the agent:
-#   1. get_weather       — real-time weather + forecast via WeatherAPI
-#   2. web_search        — real-time web search via DuckDuckGo (no API key needed)
-#   3. create_kb_tool()  — searches the session RAG knowledge base (built dynamically)
-#
-# get_base_tools()  → [weather, web_search]          before any docs are loaded
-# get_all_tools()   → [search_documents, weather, web_search]  after docs are loaded
+
 
 import requests
 from langchain.tools import tool
@@ -14,9 +7,7 @@ from langchain_community.tools import DuckDuckGoSearchRun
 from config import WEATHER_API_KEY
 
 
-# ══════════════════════════════════════════════════════════════
-#  TOOL 1 — WEATHER
-# ══════════════════════════════════════════════════════════════
+
 
 @tool
 def get_weather(location: str) -> str:
@@ -87,9 +78,7 @@ def get_weather(location: str) -> str:
         return f"Unexpected WeatherAPI response — missing key: {str(e)}"
 
 
-# ══════════════════════════════════════════════════════════════
-#  TOOL 2 — DUCKDUCKGO WEB SEARCH
-# ══════════════════════════════════════════════════════════════
+
 
 _ddg = DuckDuckGoSearchRun()
 
@@ -110,9 +99,7 @@ def web_search(query: str) -> str:
         return f"DuckDuckGo search error: {str(e)}"
 
 
-# ══════════════════════════════════════════════════════════════
-#  TOOL 3 — KNOWLEDGE BASE SEARCH (dynamic — built per session)
-# ══════════════════════════════════════════════════════════════
+
 
 def create_kb_tool(retriever):
     """
@@ -155,9 +142,7 @@ def create_kb_tool(retriever):
     return search_documents
 
 
-# ══════════════════════════════════════════════════════════════
-#  TOOL FACTORIES
-# ══════════════════════════════════════════════════════════════
+
 
 def get_base_tools() -> list:
     """Weather + web search — always available, no docs needed."""

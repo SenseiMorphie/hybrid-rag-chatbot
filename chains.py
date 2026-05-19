@@ -1,12 +1,4 @@
-# chain.py
-# Builds an OpenAI Tools Agent with three capabilities:
-#   • search_documents  — RAG over uploaded files (optional)
-#   • get_weather       — real-time weather via WeatherAPI
-#   • web_search        — real-time web search via DuckDuckGo
-#
-# Two entry points:
-#   build_agent_only()  — weather + web search only (no docs loaded yet)
-#   build_chain()       — full pipeline: RAG retriever + all tools
+
 
 from typing import List, Tuple
 
@@ -18,7 +10,7 @@ from retriever import build_retriever
 from tools import get_base_tools, get_all_tools
 
 
-# ── System prompt ─────────────────────────────────────────────
+
 SYSTEM_PROMPT = """You are a helpful AI assistant with access to the following tools:
 
 1. search_documents — searches documents, PDFs, and files the user has uploaded (only available when documents are loaded)
@@ -38,7 +30,7 @@ Cite which source (document name or URL) your information came from when relevan
 If you cannot find the answer using tools, say so honestly."""
 
 
-# ── Agent prompt template ─────────────────────────────────────
+
 AGENT_PROMPT = ChatPromptTemplate.from_messages([
     ("system", SYSTEM_PROMPT),
     MessagesPlaceholder(variable_name="chat_history"),
@@ -47,9 +39,7 @@ AGENT_PROMPT = ChatPromptTemplate.from_messages([
 ])
 
 
-# ══════════════════════════════════════════════════════════════
-#  INTERNAL BUILDER
-# ══════════════════════════════════════════════════════════════
+
 
 def _make_executor(llm, tools: list) -> AgentExecutor:
     """Wires tools + prompt into an AgentExecutor."""
@@ -64,9 +54,7 @@ def _make_executor(llm, tools: list) -> AgentExecutor:
     )
 
 
-# ══════════════════════════════════════════════════════════════
-#  PUBLIC ENTRY POINTS
-# ══════════════════════════════════════════════════════════════
+
 
 def build_agent_only(llm) -> AgentExecutor:
     """
