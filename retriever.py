@@ -1,5 +1,4 @@
-
-# FAISS + BM25 → EnsembleRetriever → MultiQueryRetriever → ContextualCompression for besttttest results 🤯 boom
+# retriever.py
 
 from typing import List, Tuple
 
@@ -16,58 +15,76 @@ from langchain_classic.retrievers.document_compressors import LLMChainExtractor
 from config import FAISS_K, BM25_K, ENSEMBLE_WEIGHTS
 
 
-def build_retriever(
-    chunks: List[Document],
-    embeddings,
-    llm,
-) -> Tuple[ContextualCompressionRetriever, FAISS]:
+def _build_pipeline(faiss_retriever, chunks: List[Document], llm):
     """
-    Builds the full 4-stage retriever pipeline.
-
-    Stage 1 — FAISS         : dense semantic similarity search
-    Stage 2 — BM25          : sparse keyword search
-    Stage 3 — Ensemble      : weighted fusion of FAISS + BM25
-    Stage 4 — MultiQuery    : generates 3 query variants to widen recall
-    Stage 5 — Compression   : LLM strips irrelevant passages from results
-
-    Args:
-        chunks:     All document chunks in the knowledge base.
-        embeddings: OpenAIEmbeddings instance.
-        llm:        ChatOpenAI instance.
-
-    Returns:
-        (final_retriever, vectorstore)
-        vectorstore is returned so it can be reused or inspected.
+    Shared pipeline builder used by both build_retriever() and
+    build_retriever_from_saved(). Takes a ready FAISS retriever
+    and builds BM25 → Ensemble → MultiQuery → Compression on top.
     """
-
-   
-    vectorstore = FAISS.from_documents(chunks, embeddings)
-    faiss_retriever = vectorstore.as_retriever(
-        search_type="similarity",
-        search_kwargs={"k": FAISS_K},
-    )
-
-    
+    # BM25
     bm25_retriever = BM25Retriever.from_documents(chunks)
     bm25_retriever.k = BM25_K
 
-    
+    # Ensemble
     ensemble_retriever = EnsembleRetriever(
         retrievers=[bm25_retriever, faiss_retriever],
-        weights=ENSEMBLE_WEIGHTS,   # [BM25, FAISS]
+        weights=ENSEMBLE_WEIGHTS,
     )
 
-    
+    # MultiQuery
     multiquery_retriever = MultiQueryRetriever.from_llm(
         retriever=ensemble_retriever,
         llm=llm,
     )
 
-    
+    # Contextual Compression
     compressor = LLMChainExtractor.from_llm(llm)
     final_retriever = ContextualCompressionRetriever(
         base_compressor=compressor,
         base_retriever=multiquery_retriever,
     )
 
+    return final_retriever
+
+
+def build_retriever(
+    chunks: List[Document],
+    embeddings,
+    llm,
+) -> Tuple[ContextualCompressionRetriever, FAISS]:
+    """
+    Builds retriever from scratch — creates a new FAISS index.
+    Called when documents are first uploaded.
+    """
+    vectorstore = FAISS.from_documents(chunks, embeddings)
+    faiss_retriever = vectorstore.as_retriever(
+        search_type="similarity",
+        search_kwargs={"k": FAISS_K},
+    )
+    final_retriever = _build_pipeline(faiss_retriever, chunks, llm)
+    return final_retriever, vectorstore
+
+
+def build_retriever_from_saved(
+    chunks: List[Document],
+    vectorstore: FAISS,
+    llm,
+) -> Tuple[ContextualCompressionRetriever, FAISS]:
+    """
+    Rebuilds retriever from a pre-loaded FAISS vectorstore.
+    Called on page reload — skips re-embedding so no API calls needed.
+
+    Args:
+        chunks:      Restored Document chunks (from JSON).
+        vectorstore: FAISS instance loaded from disk.
+        llm:         ChatOpenAI instance.
+
+    Returns:
+        (final_retriever, vectorstore)
+    """
+    faiss_retriever = vectorstore.as_retriever(
+        search_type="similarity",
+        search_kwargs={"k": FAISS_K},
+    )
+    final_retriever = _build_pipeline(faiss_retriever, chunks, llm)
     return final_retriever, vectorstore

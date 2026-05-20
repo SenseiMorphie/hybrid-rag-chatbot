@@ -1,14 +1,17 @@
-
+# app.py
+# Run with:  streamlit run app.py
 
 import os
-import sys
+import json
 import logging
+from typing import Any
+
 import streamlit as st
-from pydantic import SecretStr
+from pathlib import Path
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_core.messages import HumanMessage, AIMessage
-
-sys.path.insert(0, os.path.dirname(__file__))
+from langchain_classic.schema import Document
+from langchain_community.vectorstores import FAISS
 
 from config import (
     OPENAI_API_KEY, CHAT_MODEL, EMBEDDING_MODEL,
@@ -20,20 +23,131 @@ from doc_loader import (
     load_pdf_file, load_url, load_json_file,
 )
 from chunker import chunk_documents
-from chains import build_chain, build_agent_only
+from chains import build_chain, build_agent_only, build_chain_from_saved
 
 logging.getLogger("langchain").setLevel(logging.ERROR)
 
+# ── Persistence paths ─────────────────────────────────────────
+SESSIONS_FILE = "sessions.json"
+FAISS_DIR     = "faiss_store"   # folder that holds all FAISS indexes
+Path(FAISS_DIR).mkdir(exist_ok=True)
 
 
+# ══════════════════════════════════════════════════════════════
+#  PERSISTENCE HELPERS
+# ══════════════════════════════════════════════════════════════
+
+def _faiss_path(session_name: str) -> str:
+    """Returns the disk path for a session's FAISS index folder."""
+    safe = session_name.replace(" ", "_").replace("/", "_").replace("\\", "_")
+    return os.path.join(FAISS_DIR, safe)
+
+
+def save_sessions():
+    """
+    Saves everything to disk:
+      - sessions.json  →  messages, sources, serialised chunks
+      - faiss_store/   →  one FAISS index folder per session
+    """
+    data = {}
+    for name, sess in st.session_state.sessions.items():
+        # Serialise chunks to plain dicts
+        serialised_chunks = [
+            {"page_content": c.page_content, "metadata": c.metadata}
+            for c in sess.get("chunks", [])
+        ]
+        data[name] = {
+            "messages": sess["messages"],
+            "sources":  sess["sources"],
+            "chunks":   serialised_chunks,
+        }
+        # Save FAISS index to disk
+        if sess.get("vectorstore"):
+            try:
+                sess["vectorstore"].save_local(_faiss_path(name))
+            except Exception as e:
+                print(f"[save] FAISS save failed for '{name}': {e}")
+
+    with open(SESSIONS_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+
+def restore_sessions():
+    """
+    Restores everything from disk on page load:
+      - Deserialises chunks from JSON
+      - Loads FAISS index from disk
+      - Rebuilds BM25 + retriever pipeline + agent (no re-embedding)
+    Returns True if restore succeeded, False if nothing to restore.
+    """
+    if not Path(SESSIONS_FILE).exists():
+        return False
+
+    try:
+        with open(SESSIONS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        if not data:
+            return False
+
+        # Models must be ready before we can load FAISS
+        init_models()
+
+        st.session_state.sessions = {}
+
+        for name, saved in data.items():
+            sess = empty_session()
+            sess["messages"] = saved.get("messages", [])
+            sess["sources"]  = saved.get("sources", [])
+
+            # Deserialise chunks
+            chunks = [
+                Document(
+                    page_content=c["page_content"],
+                    metadata=c.get("metadata", {})
+                )
+                for c in saved.get("chunks", [])
+            ]
+            sess["chunks"] = chunks
+
+            # Restore FAISS + rebuild full agent if chunks exist
+            faiss_path = _faiss_path(name)
+            if chunks and Path(faiss_path).exists():
+                try:
+                    vectorstore = FAISS.load_local(
+                        faiss_path,
+                        st.session_state.embeddings,
+                        allow_dangerous_deserialization=True,
+                    )
+                    agent, retriever, vs = build_chain_from_saved(
+                        chunks, vectorstore, st.session_state.llm
+                    )
+                    sess["agent"]       = agent
+                    sess["retriever"]   = retriever
+                    sess["vectorstore"] = vs
+                except Exception as e:
+                    print(f"[restore] Failed to restore agent for '{name}': {e}")
+
+            st.session_state.sessions[name] = sess
+
+        return True
+
+    except Exception as e:
+        print(f"[restore] Session restore failed: {e}")
+        return False
+
+
+# ══════════════════════════════════════════════════════════════
+#  SESSION HELPERS
+# ══════════════════════════════════════════════════════════════
 
 def empty_session() -> dict:
     return dict(
-        messages=[],        
-        chunks=[],          
-        sources=[],         
-        agent=None,        
-        retriever=None,     
+        messages=[],
+        chunks=[],
+        sources=[],
+        agent=None,
+        retriever=None,
         vectorstore=None,
     )
 
@@ -43,11 +157,6 @@ def get_session() -> dict:
 
 
 def format_chat_history(messages: list) -> list:
-    """
-    Converts session messages to LangChain HumanMessage / AIMessage objects.
-    The agent's MessagesPlaceholder requires actual message objects.
-    Excludes the latest user message (that becomes the 'input').
-    """
     history = []
     for msg in messages:
         if msg["role"] == "user":
@@ -58,27 +167,24 @@ def format_chat_history(messages: list) -> list:
 
 
 def init_models():
-    """Initialise LLM + embeddings once. Keys come from .env via config.py."""
     if not st.session_state.get("llm"):
-        st.session_state.llm = ChatOpenAI(
-            model=CHAT_MODEL,
-            temperature=TEMPERATURE,
-            api_key=SecretStr(OPENAI_API_KEY) if OPENAI_API_KEY else None,
-            max_completion_tokens=MAX_TOKENS,
-        )
+        llm_kwargs: dict[str, Any] = {
+            "model_name": CHAT_MODEL,
+            "temperature": TEMPERATURE,
+            "openai_api_key": OPENAI_API_KEY,
+            "max_tokens": MAX_TOKENS,
+        }
+        st.session_state.llm = ChatOpenAI(**llm_kwargs)
     if not st.session_state.get("embeddings"):
-        st.session_state.embeddings = OpenAIEmbeddings(
-            model=EMBEDDING_MODEL,
-            api_key=SecretStr(OPENAI_API_KEY) if OPENAI_API_KEY else None,
-        )
+        embeddings_kwargs: dict[str, Any] = {
+            "model": EMBEDDING_MODEL,
+            "openai_api_key": OPENAI_API_KEY,
+        }
+        st.session_state.embeddings = OpenAIEmbeddings(**embeddings_kwargs)
 
 
 def init_base_agent():
-    """
-    Initialises weather + web search agent on every page load.
-    Runs before any documents are uploaded so the user can chat immediately.
-    Skipped if an agent already exists for this session.
-    """
+    """Ensures every session has at least the base agent (weather + search)."""
     init_models()
     sess = get_session()
     if sess["agent"] is None:
@@ -88,9 +194,9 @@ def init_base_agent():
 def process_and_add(docs, label: str):
     sess = get_session()
 
-    if len(sess["sources"]) >= MAX_SOURCES_PER_SESSION:          
-        st.warning(f"⚠️ Max {MAX_SOURCES_PER_SESSION} sources per session reached.") 
-        return                                                   
+    if len(sess["sources"]) >= MAX_SOURCES_PER_SESSION:
+        st.warning(f"⚠️ Max {MAX_SOURCES_PER_SESSION} sources per session reached.")
+        return
 
     with st.spinner(f"⚙️ Processing **{label}** …"):
         try:
@@ -113,6 +219,8 @@ def process_and_add(docs, label: str):
             sess["retriever"]   = retriever
             sess["vectorstore"] = vs
 
+            save_sessions()   # ← persist after every document add
+
             st.success(
                 f"✅ **{label}** added — "
                 f"{len(new_chunks)} new chunks | {len(sess['chunks'])} total"
@@ -121,7 +229,9 @@ def process_and_add(docs, label: str):
             st.error(f"❌ Error: {e}")
 
 
-
+# ══════════════════════════════════════════════════════════════
+#  PAGE CONFIG + CSS
+# ══════════════════════════════════════════════════════════════
 
 st.set_page_config(page_title="Multi-Source RAG", page_icon="🧠", layout="wide")
 
@@ -134,24 +244,35 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
+# ══════════════════════════════════════════════════════════════
+#  GLOBAL STATE INIT — restore from disk first
+# ══════════════════════════════════════════════════════════════
 
-
-if "sessions" not in st.session_state:
-    st.session_state.sessions = {"Session 1": empty_session()}
-if "active_session" not in st.session_state:
-    st.session_state.active_session = "Session 1"
 if "llm" not in st.session_state:
     st.session_state.llm = None
 if "embeddings" not in st.session_state:
     st.session_state.embeddings = None
 
+if "sessions" not in st.session_state:
+    # Try to restore from disk; fall back to a fresh session
+    restored = restore_sessions()
+    if not restored:
+        st.session_state.sessions = {"Session 1": empty_session()}
 
+if "active_session" not in st.session_state:
+    st.session_state.active_session = list(
+        st.session_state.sessions.keys()
+    )[0]
+
+
+# ══════════════════════════════════════════════════════════════
+#  SIDEBAR
+# ══════════════════════════════════════════════════════════════
 
 with st.sidebar:
 
     # ── API status ───────────────────────────────────────────
     st.markdown("## 🔐 API Status")
-
     if OPENAI_API_KEY:
         st.success("✅ OpenAI key loaded")
     else:
@@ -163,21 +284,24 @@ with st.sidebar:
     else:
         st.warning("⚠️ WEATHER_API_KEY missing — weather tool disabled")
 
-    st.success("✅ DuckDuckGo search ready (no key needed)")
+    st.success("✅ DuckDuckGo / Tavily search ready")
 
     st.divider()
 
     # ── Active tools ─────────────────────────────────────────
     st.markdown("## 🔧 Active Tools")
     sess = get_session()
-    st.markdown(f"{'✅' if sess['retriever'] else '⬜'} `search_documents` "
-                f"{'— ' + str(len(sess['chunks'])) + ' chunks' if sess['retriever'] else '— no docs loaded'}")
+    st.markdown(
+        f"{'✅' if sess['retriever'] else '⬜'} `search_documents` "
+        f"{'— ' + str(len(sess['chunks'])) + ' chunks' if sess['retriever'] else '— no docs loaded'}"
+    )
     st.markdown(f"{'✅' if WEATHER_API_KEY else '❌'} `get_weather`")
-    st.markdown("✅ `web_search` (DuckDuckGo)")
+    st.markdown("✅ `web_search`")
+    st.markdown("✅ `get_current_datetime`")
 
     st.divider()
 
-    
+    # ── Session manager ──────────────────────────────────────
     st.markdown("## 💬 Chat Sessions")
 
     col_name, col_btn = st.columns([3, 1])
@@ -192,6 +316,7 @@ with st.sidebar:
             if name and name not in st.session_state.sessions:
                 st.session_state.sessions[name] = empty_session()
                 st.session_state.active_session = name
+                save_sessions()   # ← persist new session
                 st.rerun()
 
     for sname in list(st.session_state.sessions.keys()):
@@ -209,16 +334,29 @@ with st.sidebar:
         with c2:
             if st.button("🗑", key=f"del_{sname}", use_container_width=True):
                 if len(st.session_state.sessions) > 1:
+                    # Delete FAISS folder for this session
+                    faiss_path = Path(_faiss_path(sname))
+                    if faiss_path.exists():
+                        import shutil
+                        shutil.rmtree(faiss_path)
                     del st.session_state.sessions[sname]
                     if st.session_state.active_session == sname:
                         st.session_state.active_session = list(
                             st.session_state.sessions.keys()
                         )[0]
+                    save_sessions()   # ← persist deletion
                     st.rerun()
+
+    # ── Clear chat ───────────────────────────────────────────
+    st.markdown("## 🗑 Clear Chat")
+    if st.button("Clear Chat History", use_container_width=True, key="clear_chat"):
+        get_session()["messages"] = []
+        save_sessions()
+        st.rerun()
 
     st.divider()
 
-   
+    # ── Document input ───────────────────────────────────────
     st.markdown("## 📁 Add Documents *(optional)*")
     st.caption("Upload files to enable document Q&A alongside weather and web search.")
 
@@ -262,7 +400,7 @@ with st.sidebar:
             if f:   process_and_add(load_json_file(f), f.name)
             else:   st.warning("Upload a JSON file first.")
 
-    
+    # ── Knowledge base summary ───────────────────────────────
     sess = get_session()
     if sess["sources"]:
         st.divider()
@@ -272,10 +410,19 @@ with st.sidebar:
             for i, s in enumerate(sess["sources"], 1):
                 st.write(f"{i}. {s}")
         if st.button("🗑 Clear Knowledge Base", use_container_width=True, key="clear_kb"):
+            name = st.session_state.active_session
+            faiss_path = Path(_faiss_path(name))
+            if faiss_path.exists():
+                import shutil
+                shutil.rmtree(faiss_path)
             get_session().update(empty_session())
+            save_sessions()
             st.rerun()
 
 
+# ══════════════════════════════════════════════════════════════
+#  MAIN — CHAT UI
+# ══════════════════════════════════════════════════════════════
 
 init_base_agent()
 
@@ -284,7 +431,6 @@ aname = st.session_state.active_session
 
 st.markdown(f"# 🧠 {aname}")
 
-# Status bar
 c1, c2, c3 = st.columns(3)
 if sess["retriever"]:
     c1.metric("Status", "🟢 Docs + Tools")
@@ -297,7 +443,7 @@ c3.metric("Sources", len(sess["sources"]))
 
 st.divider()
 
-
+# ── Empty state ──────────────────────────────────────────────
 if not sess["messages"]:
     st.markdown(
         "<div style='text-align:center; padding:50px 20px; color:#9ca3af;'>"
@@ -311,7 +457,7 @@ if not sess["messages"]:
         unsafe_allow_html=True,
     )
 
-
+# ── Chat history ─────────────────────────────────────────────
 for msg in sess["messages"]:
     with st.chat_message(msg["role"]):
         st.write(msg["content"])
@@ -332,7 +478,7 @@ for msg in sess["messages"]:
                     st.markdown(f"> {src['content'][:350]}…")
                     st.divider()
 
-
+# ── Chat input ───────────────────────────────────────────────
 prompt = st.chat_input("Ask anything — weather, news, or questions about your documents…")
 
 if prompt:
@@ -340,14 +486,15 @@ if prompt:
         st.error("Agent not initialised — please refresh the page.")
 
     elif len([m for m in sess["messages"] if m["role"] == "user"]) >= MAX_REQUESTS_PER_SESSION:
-        st.warning(f"⚠️ Session limit of {MAX_REQUESTS_PER_SESSION} messages reached. "
-                   "Start a new session from the sidebar.")
+        st.warning(
+            f"⚠️ Session limit of {MAX_REQUESTS_PER_SESSION} messages reached. "
+            "Start a new session from the sidebar."
+        )
 
     else:
-        sess["messages"].append({"role": "user", "content": prompt})
-        sess["messages"].append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.write(prompt)
+        sess["messages"].append({"role": "user", "content": prompt})
 
         with st.chat_message("assistant"):
             with st.spinner("🤔 Thinking…"):
@@ -364,7 +511,6 @@ if prompt:
 
                     st.write(answer)
 
-                    # ── Parse tool calls ──────────────────────
                     tools_used   = []
                     sources_data = []
                     seen_snips   = set()
@@ -372,8 +518,8 @@ if prompt:
                     if steps:
                         with st.expander("🔧 Tools used"):
                             for action, observation in steps:
-                                tool_name  = action.tool
-                                tool_input = str(action.tool_input)
+                                tool_name   = action.tool
+                                tool_input  = str(action.tool_input)
                                 tool_output = str(observation)
 
                                 tools_used.append({
@@ -388,7 +534,6 @@ if prompt:
                                     st.text(tool_output[:800])
                                 st.divider()
 
-                                # Extract sources from KB search tool calls
                                 if tool_name == "search_documents" and sess["retriever"]:
                                     try:
                                         query = (
@@ -421,6 +566,8 @@ if prompt:
                         "tools_used": tools_used,
                         "sources":    sources_data,
                     })
+
+                    save_sessions()   # ← persist after every message
 
                 except Exception as e:
                     err = f"Error: {e}"

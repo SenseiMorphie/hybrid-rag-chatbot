@@ -2,9 +2,15 @@
 
 import requests
 from langchain.tools import tool
-from langchain_community.tools import DuckDuckGoSearchRun
+
+from datetime import datetime
+from tavily import TavilyClient
 
 from config import WEATHER_API_KEY
+from datetime import datetime, timezone
+from config import WEATHER_API_KEY, TAVILY_API_KEY
+import os
+os.environ["TAVILY_API_KEY"] = TAVILY_API_KEY or ""
 
 
 
@@ -77,10 +83,32 @@ def get_weather(location: str) -> str:
     except KeyError as e:
         return f"Unexpected WeatherAPI response — missing key: {str(e)}"
 
+# ══════════════════════════════════════════════════════════════
+#  TOOL 4 — CURRENT DATE & TIME
+# ══════════════════════════════════════════════════════════════
+
+@tool
+def get_current_datetime(query: str) -> str:
+    """
+    Returns the current real date and time.
+    Use this tool whenever the user asks what today's date is,
+    what time it is, what day of the week it is, or anything
+    related to the current date or time.
+    Input can be anything — it is ignored.
+    """
+    now = datetime.now()
+    return f"""
+📅 Current Date & Time
+  Date      : {now.strftime("%A, %B %d, %Y")}
+  Time      : {now.strftime("%I:%M %p")}
+  Day       : {now.strftime("%A")}
+  Week No.  : {now.strftime("%W")}
+""".strip()
 
 
 
-_ddg = DuckDuckGoSearchRun()
+
+_tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
 
 @tool
 def web_search(query: str) -> str:
@@ -91,12 +119,38 @@ def web_search(query: str) -> str:
     Input should be a clear search query string.
     """
     try:
-        result = _ddg.run(query)
-        if not result:
+        today = datetime.now().strftime("%Y-%m-%d")
+
+        response = _tavily_client.search(
+            query=f"{query} {today}",   # appends today's date to force fresh results
+            search_depth="advanced",    # deeper search than basic
+            max_results=6,
+            include_answer=True,        # Tavily generates a direct answer too
+            include_published_date=True # forces date filtering
+        )
+
+        results  = response.get("results", [])
+        answer   = response.get("answer", "")
+
+        if not results:
             return f"No results found for: '{query}'"
-        return f"🔍 Web search results for '{query}':\n\n{result}"
+
+        output = f"🔍 Search results for '{query}':\n\n"
+
+        if answer:
+            output += f"📌 Quick answer: {answer}\n\n"
+
+        for i, r in enumerate(results, 1):
+            pub_date = r.get("published_date", "Date unknown")
+            output += f"{i}. **{r.get('title', 'No title')}**\n"
+            output += f"   Source : {r.get('url', '')}\n"
+            output += f"   Date   : {pub_date}\n"
+            output += f"   Summary: {r.get('content', 'No content')[:300]}\n\n"
+
+        return output.strip()
+
     except Exception as e:
-        return f"DuckDuckGo search error: {str(e)}"
+        return f"Search error: {str(e)}"
 
 
 
@@ -145,10 +199,7 @@ def create_kb_tool(retriever):
 
 
 def get_base_tools() -> list:
-    """Weather + web search — always available, no docs needed."""
-    return [get_weather, web_search]
-
+    return [get_current_datetime, get_weather, web_search]
 
 def get_all_tools(retriever) -> list:
-    """Full tool set once documents are loaded. KB search listed first."""
-    return [create_kb_tool(retriever), get_weather, web_search]
+    return [create_kb_tool(retriever), get_current_datetime, get_weather, web_search]
